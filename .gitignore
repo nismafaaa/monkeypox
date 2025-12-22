@@ -1,0 +1,25 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# uv package manager lock file
+uv.lock
+
+# Weights & Biases logs
+wandb/
+
+# Training outputs and checkpoints
+output/
+checkpoints/
+*.ckpt
+*.pt
+*.pth
+
+dataset/
