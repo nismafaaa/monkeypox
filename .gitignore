@@ -23,3 +23,5 @@ checkpoints/
 *.pth
 
 dataset/
+
+mpox-sd-15-lora/
