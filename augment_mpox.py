@@ -6,16 +6,9 @@ import albumentations as A
 
 SRC_DIR = os.path.expanduser("~/mpox-dataset")
 DST_DIR = os.path.expanduser("~/mpox-augmented")
-
-# How many augmented variants per source image
+e
 AUG_PER_IMAGE = 5
 
-# Medical-safe-ish aug policy:
-# - modest geometry changes
-# - mild photometric jitter
-# - mild blur/noise
-# - slight elastic distort (low alpha)
-# Avoid extreme color shifts that could change lesion appearance
 transform = A.Compose([
     A.OneOf([
         A.HorizontalFlip(p=1.0),
@@ -65,13 +58,11 @@ def main():
     for src in tqdm(imgs):
         try:
             img = read_bgr(src)
-            # Save a resized 512x512 "baseline" copy too (optional, helps standardize)
             base_out = dst_path(src)
             ensure_parent(base_out)
             base = cv2.resize(img, (512,512), interpolation=cv2.INTER_AREA)
             cv2.imwrite(base_out, base, [cv2.IMWRITE_JPEG_QUALITY, 95])
 
-            # Generate AUG_PER_IMAGE variants
             for k in range(AUG_PER_IMAGE):
                 aug = transform(image=to_rgb(img))["image"]
                 aug = to_bgr(cv2.resize(aug, (512,512), interpolation=cv2.INTER_AREA))

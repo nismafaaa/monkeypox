@@ -4,10 +4,12 @@ from pathlib import Path
 from tqdm import trange
 import sys
 
+# --- CONFIGURATION ---
 MODEL_NAME = "runwayml/stable-diffusion-v1-5"
-LORA_DIR   = os.path.expanduser("~/mpox-sd15-lora/weights-sd15-mpox")
-OUT_DIR    = os.path.expanduser("~/mpox-sd15-lora/synth")
-PROMPT     = "clinical photo of a mpox skin lesion, high detail, clinical lighting"
+LORA_DIR   = os.path.expanduser("~/mpox-dm/mpox-sd15-lora/weights-sd15-mpox")
+OUT_DIR    = os.path.expanduser("~/mpox-dm/mpox-sd15-lora/synth")
+
+PROMPT     = "clinical photo of a monkeypox skin lesion, 4k, high resolution, sharp focus" 
 NEG_PROMPT = "watermark, text, logo, artifacts, unrealistic, drawing, cartoon, nsfw, nude"
 
 NUM_IMAGES = 500
@@ -15,30 +17,31 @@ GUIDANCE   = 7.5
 STEPS      = 30
 SEED       = 1234
 
+# --- GENERATION SETUP ---
 os.makedirs(OUT_DIR, exist_ok=True)
-torch_dtype = torch.float16
+torch_dtype = torch.bfloat16 
 device = "cuda"
 
-# 🔧 Disable safety checker to prevent black images
+print(f"[Setup] Loading Pipeline...")
 pipe = StableDiffusionPipeline.from_pretrained(
     MODEL_NAME,
     torch_dtype=torch_dtype,
     safety_checker=None
 )
-# For older/newer versions that still expect the flag:
 pipe.safety_checker = lambda images, **kwargs: (images, [False] * len(images))
-# Some versions also check this attribute:
 pipe.requires_safety_checker = False
 
 pipe = pipe.to(device)
 
-# Load LoRA
+print(f"[Setup] Loading LoRA from {LORA_DIR}...")
 pipe.load_lora_weights(LORA_DIR)
 pipe.fuse_lora()
 
+# --- GENERATION LOOP ---
 g = torch.Generator(device=device).manual_seed(SEED)
 
 generated_paths = []
+print(f"[Generation] Generating {NUM_IMAGES} images...")
 for i in trange(NUM_IMAGES):
     img = pipe(
         prompt=PROMPT,
@@ -47,36 +50,62 @@ for i in trange(NUM_IMAGES):
         guidance_scale=GUIDANCE,
         generator=g
     ).images[0]
+    
     img_path = os.path.join(OUT_DIR, f"mpox_synth_{i:05d}.jpg")
     img.save(img_path)
     generated_paths.append(img_path)
 
-# --- Optional metrics after generation ---
-if EVAL_REAL_DIR := os.getenv("EVAL_REAL_DIR"):  # directory of real images to compare; optional
-    EVAL_MAX = int(os.getenv("EVAL_MAX", "200"))
-    # Add metrics import path
-    sys.path.append(str(Path(__file__).resolve().parent))
+# --- METRICS EVALUATION BLOCK (UPDATED) ---
+if EVAL_REAL_DIR := os.getenv("EVAL_REAL_DIR"):
+    print(f"\n[Evaluation] Starting metrics calculation against: {EVAL_REAL_DIR}")
+
+    sys.path.append(os.getcwd()) 
     try:
-        from metrics.fid import get_inception, compute_ref_stats, compute_fid
+        from metrics.fid import compute_fid_score
         from metrics.ssim import compute_ssim
         from torchvision import transforms
-    except Exception:
-        pass
+        from PIL import Image
+    except ImportError:
+        print("Error: Could not import metrics. Ensure 'metrics/fid.py' and 'metrics/ssim.py' exist.")
+        sys.exit(1)
 
     real_dir = Path(EVAL_REAL_DIR)
-    real_paths = sorted([p for p in real_dir.iterdir() if p.suffix.lower() in ('.jpg', '.png', '.jpeg')])
-    gen_subset = generated_paths[:EVAL_MAX]
-    to_tensor = transforms.ToTensor()
-    device = torch.device(device if torch.cuda.is_available() else "cpu")
-    fid_model = get_inception(device)
-    fid_mu, fid_sigma = compute_ref_stats(real_paths, device, fid_model, max_images=EVAL_MAX)
-    # Load generated subset
-    from PIL import Image
-    gen_imgs = [to_tensor(Image.open(p).convert("RGB")) for p in gen_subset]
-    gen_tensor = torch.stack(gen_imgs).to(device)
-    fid_val = compute_fid(gen_tensor, fid_mu, fid_sigma, fid_model, device)
-    # SSIM (match counts)
-    real_imgs_match = [to_tensor(Image.open(p).convert("RGB")) for p in real_paths[: len(gen_subset)]]
-    real_tensor = torch.stack(real_imgs_match).to(device)
+    fake_dir = Path(OUT_DIR)
+    
+    real_paths = sorted([str(p) for p in real_dir.iterdir() if p.suffix.lower() in ('.jpg', '.png', '.jpeg')])
+    fake_paths = sorted([str(p) for p in fake_dir.iterdir() if p.suffix.lower() in ('.jpg', '.png', '.jpeg')])
+
+    eval_max_env = os.getenv("EVAL_MAX")
+    limit = int(eval_max_env) if eval_max_env else min(len(real_paths), len(fake_paths))
+    
+    print(f"[Evaluation] Comparing {limit} images...")
+    real_paths = real_paths[:limit]
+    fake_paths = fake_paths[:limit]
+
+    print("[Metrics] Calculating FID...")
+    fid_val = compute_fid_score(real_paths, fake_paths, device_str="cuda")
+
+    print("[Metrics] Calculating SSIM...")
+
+    transform = transforms.Compose([
+        transforms.Resize((512, 512)), 
+        transforms.ToTensor(),
+    ])
+    
+    def load_tensor_batch(paths):
+        imgs = []
+        for p in paths:
+            img = Image.open(p).convert("RGB")
+            imgs.append(transform(img))
+        return torch.stack(imgs).to(device)
+
+    real_tensor = load_tensor_batch(real_paths)
+    gen_tensor = load_tensor_batch(fake_paths)
+    
     ssim_val = compute_ssim(real_tensor, gen_tensor)
-    print(f"[Metrics] FID: {fid_val:.3f} | SSIM: {ssim_val:.4f} (N={len(gen_subset)})")
+
+    print("-" * 40)
+    print(f"FINAL RESULTS (N={limit})")
+    print(f"FID:  {fid_val:.4f} (Lower is better)")
+    print(f"SSIM: {ssim_val:.4f} (Target: ~0.3-0.5)")
+    print("-" * 40)
